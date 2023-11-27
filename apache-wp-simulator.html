@@ -42,7 +42,7 @@ input[type="number"] {
 
 <h2>Apache settings</h2>
 
-<p>Assuming that <code>mpm_prefork</code> is being used, with Debian. Debian defines different default values for <code>mrm_prefork</code> than the defaults mentioned in Apache's documentation.</p>
+<p>Assuming that <code>mpm_prefork</code> is being used, with Debian. Debian defines different default values for <code>mpm_prefork</code> than the defaults mentioned in Apache's documentation.</p>
 
 <table class="settings">
   <thead>
@@ -108,7 +108,7 @@ input[type="number"] {
     <tr>
       <th>RAM taken per Apache process</th>
       <td><input name="ram-per-apache-worker" type="number" min="16" step="16" value="16"> MB</td>
-      <td>How much memory a single Apache process takes on average. Note that PHP runs inside the Apache process when using <code>mrm_prefork</code>, and PHP with WP takes a lot of memory. See <code>top</code> on your server to see how much memory Apache processes usually take.</td>
+      <td>How much memory a single Apache process takes on average. Note that PHP runs inside the Apache process when using <code>mpm_prefork</code>, and PHP with WP takes a lot of memory. See <code>top</code> on your server to see how much memory Apache processes usually take.</td>
     </tr>
   </tbody>
 </table>
