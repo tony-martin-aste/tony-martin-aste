@@ -1,0 +1,292 @@
+<!doctype html>
+<html>
+<head>
+<title>Apache simulator</title>
+<style type="text/css">
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  padding: 20px 20px 250px;
+  font-family: sans-serif;
+  font-size: 14px;
+  line-height: 1.3em;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+table th,
+table td {
+  border: 1px solid #999;
+  padding: 3px 8px;
+}
+
+table.settings td:nth-child(2) {
+  white-space: nowrap;
+}
+
+input[type="number"] {
+  width: 5em;
+}
+</style>
+</head>
+<body>
+<h1>Apache simulator</h1>
+
+<p>This simulator assumes that you're serving a WordPress site through Apache. The simulator shows you how Apache's settings and the WP site's performance affect the maximum number of simultaneous visitors.</p>
+
+<h2>Apache settings</h2>
+
+<p>Assuming that <code>mpm_prefork</code> is being used, with Debian. Debian defines different default values for <code>mrm_prefork</code> than the defaults mentioned in Apache's documentation.</p>
+
+<table class="settings">
+  <thead>
+    <tr>
+      <th>Setting</th>
+      <th>Value</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>MaxRequestWorkers and ServerLimit</th>
+      <td><input name="max-request-workers" type="number" min="1" step="10" value="150"> (default: 150)</td>
+      <td>
+        Sets the limit on the number of simultaneous requests that will be served. Any connection attempts over the MaxRequestWorkers limit will normally be queued, up to a number based on the ListenBacklog directive. Once a child process is freed at the end of a different request, the connection will then be serviced.
+        <br>
+        MaxRequestWorkers: To increase this, you must also raise ServerLimit.
+        <br>
+        ServerLimit: Do not set the value of this directive any higher than what you might want to set MaxRequestWorkers to.
+        <br>
+        Here we'll assume that the same value is used for both settings.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Other settings</h2>
+
+<table class="settings">
+  <thead>
+    <tr>
+      <th>Setting</th>
+      <th>Value</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>WP load time</th>
+      <td><input name="wp-load-time" type="number" min="0.1" step="0.1" value="2"> seconds</td>
+      <td>
+        How much time a single WP page load takes. Note: a random value will be added to this, to simulate varying code paths and varying load on the server.
+        <br>
+        <br>
+        Use a value like "2" if you want to simulate a WP page load that doesn't hit a WP page cache (e.g., Batcache). Use a value like "0.2" if you want to simulate a WP page load that hits a WP page cache.
+      </td>
+    </tr>
+    <tr>
+      <th>Number of static files in a single WP page load</th>
+      <td><input name="static-files" type="number" min="0" step="1" value="15"> static files</td>
+      <td>How many JS, CSS, image and other static files are loaded during a single WP page load. You can see this in your browser's inspector's Network tab. In Chrome, you can filter results from only the WP site's domain with this filter: <code>domain:yourwpsitedomain.fi</code></td>
+    </tr>
+    <tr>
+      <th>Load time per static file</th>
+      <td><input name="static-file-load-time" type="number" min="0.05" step="0.05" value="0.1"> seconds</td>
+      <td>How fast a single static file loads on average. Note: a random value (sometimes a few seconds) will be added to this to also simulate the fact that a static file has to be <strong>fully</strong> downloaded by the client (i.e., a web browser) until the Apache process can be freed for another incoming request. Clients have varying download speeds, and slow mobile connections may take several seconds to download an image file, which keeps an Apache process occupied for all of that time.</td>
+    </tr>
+    <tr>
+      <th>Available RAM on the server</th>
+      <td><input name="ram" type="number" min="512" step="512" value="4096"> MB</td>
+      <td>How much RAM your server has. In practice, this determines how high you can set MaxRequestWorkers. Don't set this to the full amount of RAM of the server, since you need to leave some RAM for the operating system and other processes.</td>
+    </tr>
+    <tr>
+      <th>RAM taken per Apache process</th>
+      <td><input name="ram-per-apache-worker" type="number" min="16" step="16" value="16"> MB</td>
+      <td>How much memory a single Apache process takes on average. Note that PHP runs inside the Apache process when using <code>mrm_prefork</code>, and PHP with WP takes a lot of memory. See <code>top</code> on your server to see how much memory Apache processes usually take.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Simulation</h2>
+
+<button id="start-stop-button">Start</button>
+
+<p>WP page loads per second: <input name="wp-page-loads-per-second" type="number" min="1" step="1" value="2"></p>
+
+<pre id="stats"></pre>
+<pre id="log"></pre>
+
+<script>
+
+// Runtime state
+let running = false;
+let requests = [];
+let logRows = [];
+let wpPageLoadRequestsAddedLastTimestamp = 0;
+
+// Settings
+let maxRequestWorkers;
+let wpLoadTime;
+let staticFiles;
+let staticFileLoadTime;
+let wpPageLoadsPerSecond;
+let ram;
+let ramPerApacheWorker;
+const HOW_LONG_A_CLIENT_TAKES_TO_DOWNLOAD_A_BIG_STATIC_FILE_AT_WORST_IN_SECONDS = 4;
+
+document.querySelector( '#start-stop-button' ).addEventListener( 'click', ( event ) => {
+  if ( running ) {
+    event.target.innerHTML = 'Start';
+    stop();
+  }
+  else {
+    event.target.innerHTML = 'Stop';
+    start();
+  }
+} );
+
+document.querySelectorAll( 'input[name]' ).forEach( input => {
+  input.addEventListener( 'change', ( event ) => {
+    if ( running ) {  
+      stop();
+      start();
+    }
+  } );
+} );
+
+function log( msg ) {
+  const now = new Date();
+  logRows.push( `[${ String( now.getHours() ).padStart( 2, '0' ) }:${ String( now.getMinutes() ).padStart( 2, '0' ) }:${ String( now.getSeconds() ).padStart( 2, '0' ) }] ${ msg }` );
+  logRows = logRows.slice( -10 );
+
+  document.querySelector( '#log' ).textContent = logRows.join( '\n' );
+}
+
+function parseSettings() {
+  maxRequestWorkers = parseInt( document.querySelector( 'input[name="max-request-workers"]' ).value, 10 ) || 150;
+  wpLoadTime = parseFloat( document.querySelector( 'input[name="wp-load-time"]' ).value ) || 1.5;
+  staticFiles = parseInt( document.querySelector( 'input[name="static-files"]' ).value, 10 ) || 15;
+  staticFileLoadTime = parseFloat( document.querySelector( 'input[name="static-file-load-time"]' ).value ) || 0.1;
+  wpPageLoadsPerSecond = parseInt( document.querySelector( 'input[name="wp-page-loads-per-second"]' ).value, 10 ) || 2;
+  ram = parseInt( document.querySelector( 'input[name="ram"]' ).value, 10 ) || 1024;
+  ramPerApacheWorker = parseInt( document.querySelector( 'input[name="ram-per-apache-worker"]' ).value, 10 ) || 32;
+}
+
+function getActiveRequestsCount() {
+  let count = 0;
+
+  for ( let request of requests ) {
+    if ( request.status === 'active' ) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+function addWpPageLoadRequests( count ) {
+  const now = ( new Date() ).getTime();
+
+  for ( let i = 0; i < count; i++ ) {
+    requests.push( {
+      type: 'wp',
+      status: 'queued',
+      addedTimestamp: now,
+      startedTimestamp: 0,
+      loadTime: wpLoadTime + wpLoadTime * Math.random() / 5,
+    } );
+
+    for ( let j = 0; j < staticFiles; j++ ) {
+      requests.push( {
+        type: 'static',
+        status: 'queued',
+        startedTimestamp: 0,
+        loadTime: staticFileLoadTime + HOW_LONG_A_CLIENT_TAKES_TO_DOWNLOAD_A_BIG_STATIC_FILE_AT_WORST_IN_SECONDS * Math.pow( Math.random(), 5 ),
+      } );
+    }
+  }
+}
+
+function loop() {
+  if ( !running ) {
+    return;
+  }
+
+  const now = ( new Date() ).getTime();
+
+  if ( now - wpPageLoadRequestsAddedLastTimestamp > 1000 ) {
+    wpPageLoadRequestsAddedLastTimestamp = now;
+    addWpPageLoadRequests( wpPageLoadsPerSecond );
+  }
+
+  // Finish requests that have taken enough time
+  requests = requests.filter( request => {
+    if ( request.status === 'active' && ( now - request.startedTimestamp ) / 1000 >= request.loadTime ) {
+      if ( request.type === 'wp' ) {
+        log( `WP page took ${ ( ( now - request.addedTimestamp ) / 1000 ).toFixed( 2 ) } seconds to load` );
+      }
+
+      return false;
+    }
+
+    return true;
+  } );
+
+  // Dequeue as many requests as we have available workers for
+  for ( let request of requests ) {
+    const activeRequests = getActiveRequestsCount();
+
+    if ( activeRequests >= maxRequestWorkers ) {
+      break;
+    }
+
+    if ( request.status === 'queued' ) {
+      request.status = 'active';
+      request.startedTimestamp = now;
+    }
+  }
+
+  const activeRequests = getActiveRequestsCount();
+  const freeRam = ram - ramPerApacheWorker * maxRequestWorkers;
+
+  document.querySelector( '#stats' ).textContent = `
+Minimum WP page load time: ${ wpLoadTime } seconds
+Static files loaded per WP page load: ${ staticFiles } files (JS, CSS, JPG, etc. You can check this from your browser's Network tab.)
+MaxRequestWorkers: ${ maxRequestWorkers }
+Active requests: ${ activeRequests }
+Queued requests: ${ requests.length - activeRequests } (If this keeps increasing, you need more MaxRequestWorkers, faster load times, or less static files loaded)
+Free RAM: ${ freeRam } MB ${ freeRam < 0 ? '(Out of RAM! MaxRequestWorkers is too high, or the server does not have enough RAM.)' : '' }
+`;
+
+  setTimeout( loop, 10 );
+}
+
+function start() {
+  requests = [];
+  wpPageLoadRequestsAddedLastTimestamp = 0;
+
+  parseSettings();
+
+  running = true;
+
+  logRows.length = 0;
+  log( 'Started' );
+
+  loop();
+}
+
+function stop() {
+  running = false;
+  log( 'Stopped' );
+}
+
+</script>
+
+</body>
+</html>
